@@ -1,0 +1,53 @@
+#!/bin/bash
+
+# Oracle E-Business Suite 12.2 Troubleshooting and Diagnostic Script
+# This script helps in troubleshooting and diagnosing common issues.
+
+# Set environment variables
+export APPL_TOP="/u01/apps/appl"          # The location of the APPL_TOP directory
+export ORACLE_HOME="/u01/app/oracle/product/12.2.0/dbhome_1" # The location of the Oracle Home directory
+export LOG_DIR="$APPL_TOP/admin/logs"     # The directory where Oracle EBS logs are stored
+export EBS_HOME="/u01/app/oracle/ebs"      # The location of the EBS installation directory
+
+# 1. Check System Logs for Errors
+echo "Checking system logs for errors..."
+grep -i "error" $LOG_DIR/*.log           # Search for errors in all logs under the $LOG_DIR
+echo "Log file error check completed."
+
+# 2. Check Oracle EBS Service Status
+echo "Checking Oracle EBS service status..."
+$EBS_HOME/bin/adstrtal.sh status          # Check if all necessary EBS services are running
+echo "Service status check completed."
+
+# 3. Check Database Alert Log for Errors
+echo "Checking database alert log for errors..."
+tail -n 50 $ORACLE_HOME/rdbms/admin/alert.log  # Get the last 50 lines of the database alert log
+echo "Database alert log check completed."
+
+# 4. Check Concurrent Request Errors
+echo "Checking for errors in concurrent requests..."
+sqlplus -s /nolog <<EOF
+connect apps/apps                          # Connect to the EBS database
+SELECT request_id, status_code, error_code, phase_code 
+FROM fnd_concurrent_requests 
+WHERE status_code = 'ERROR' AND request_date > SYSDATE - 1;  # Fetch recent error requests
+EXIT;
+EOF
+echo "Concurrent request error check completed."
+
+# 5. Check Oracle EBS System Tables for Issues
+echo "Checking system tables for issues..."
+sqlplus -s /nolog <<EOF
+connect apps/apps                          # Connect to the EBS database
+SELECT * FROM fnd_tables WHERE table_name = 'FND_TABLES';  # Check the FND_TABLES system table
+EXIT;
+EOF
+echo "System table check completed."
+
+# 6. Run Diagnostics for EBS Health
+echo "Running Oracle EBS diagnostics..."
+$EBS_HOME/bin/adcheck.pl                   # Run the adcheck utility for Oracle EBS health diagnostics
+echo "EBS diagnostics completed."
+
+# Completion Message
+echo "Oracle EBS 12.2 Troubleshooting completed successfully!"

@@ -1,0 +1,71 @@
+Find on which row is waiting blocked sesssion when you have TX - row lock contention
+
+There may be situation When your session is Waiting for row lock, but which row is locked in oracle database?
+
+Session 1
+
+SQL> select * from TESTUSER.dept;
+ 
+DEPTNO DNAME          LOC
+------ -------------- -------------
+    10 ACCOUNTING     AAAA
+    20 RESEARCH       BBBB
+    30 SALES          CCCC
+    40 OPERATIONS     DDDD
+
+SQL> update TESTUSER.dept set loc='SESSION1' where deptno=10; 
+ 
+1 row updated
+
+
+Session 2
+
+SQL> select * from TESTUSER.dept;
+ 
+DEPTNO DNAME          LOC
+------ -------------- -------------
+    10 ACCOUNTING     AAAA
+    20 RESEARCH       BBBB
+    30 SALES          CCCC
+    40 OPERATIONS     DDDD
+
+SQL> update TESTUSER.dept set loc='SESSION2' where deptno=10; 
+
+Now second session waiting for first session because there is row lock on table TESTUSER.dept and we need to find on which row is waiting second session
+
+SQL> select sid, event from gv$session where event like 'enq%';
+ 
+       SID EVENT
+---------- ----------------------------------------------------------------
+       133 enq: TX - row lock contention
+ 
+SQL> column owner format a10
+SQL> column object_name format a12
+SQL> column row_wait_obj# format a10
+SQL> column row_wait_file# format a6
+SQL> column row_wait_block# format a8
+SQL> select o.owner,
+           o.object_name,
+           row_wait_obj#,
+           row_wait_file#,
+           row_wait_block#,
+           row_wait_row#,
+           dbms_rowid.rowid_create(1,
+                                   o.DATA_OBJECT_ID,
+                                   ROW_WAIT_FILE#,
+                                  ROW_WAIT_BLOCK#,
+                                  ROW_WAIT_ROW#) as "RowID"
+     from gv$session s, 
+          dba_objects o
+     where sid = 133    ---- waiting session id
+     and s.ROW_WAIT_OBJ# = o.OBJECT_ID;
+ 
+OWNER      OBJECT_NAME  ROW_WAIT_O ROW_WA ROW_WAIT ROW_WAIT_ROW# RowID
+---------- ------------ ---------- ------ -------- ------------- ------------------
+TESTUSER      DEPT              75333      4      135             0 AAASZFAAEAAAACHAAA
+ 
+SQL> select * from TESTUSER.dept where rowid='AAASZFAAEAAAACHAAA';
+ 
+DEPTNO DNAME          LOC
+------ -------------- -------------
+    10 ACCOUNTING     AAAA

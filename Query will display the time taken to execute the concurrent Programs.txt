@@ -1,0 +1,39 @@
+Query will display the time taken to execute the concurrent Programs
+====================================================================================
+
+SELECT
+      f.request_id ,
+      pt.user_concurrent_program_name user_conc_program_name,
+      f.actual_start_date start_on,
+      f.actual_completion_date end_on,
+      floor(((f.actual_completion_date-f.actual_start_date)
+        *24*60*60)/3600)
+        || ' HOURS ' ||
+        floor((((f.actual_completion_date-f.actual_start_date)
+        *24*60*60) -
+        floor(((f.actual_completion_date-f.actual_start_date)
+        *24*60*60)/3600)*3600)/60)
+        || ' MINUTES ' ||
+        round((((f.actual_completion_date-f.actual_start_date)
+        *24*60*60) -
+        floor(((f.actual_completion_date-f.actual_start_date)
+        *24*60*60)/3600)*3600 -
+        (floor((((f.actual_completion_date-f.actual_start_date)
+        *24*60*60) -
+        floor(((f.actual_completion_date-f.actual_start_date)
+        *24*60*60)/3600)*3600)/60)*60) ))
+        || ' SECS ' time_difference,
+      p.concurrent_program_name concurrent_program_name,
+      decode(f.phase_code,'R','Running','C','Complete',f.phase_code) Phase,
+      f.status_code
+from  apps.fnd_concurrent_programs p,
+      apps.fnd_concurrent_programs_tl pt,
+      apps.fnd_concurrent_requests f
+where f.concurrent_program_id = p.concurrent_program_id
+      and f.program_application_id = p.application_id
+      and f.concurrent_program_id = pt.concurrent_program_id
+      and f.program_application_id = pt.application_id
+      AND pt.language = USERENV('Lang')
+      and f.actual_start_date is not null
+order by
+      f.actual_start_date desc;

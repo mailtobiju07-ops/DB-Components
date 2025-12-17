@@ -1,0 +1,174 @@
+#!/bin/bash
+
+# EBS 12.2 Administrative Maintenance Script
+# This script automates common tasks like health checks, service status, patching, logs monitoring, etc.
+
+# Variables
+export APPL_TOP="/apps/appl"
+export ORACLE_HOME="/u01/app/oracle/product/12.2.0/dbhome_1"
+export FND_TOP="$APPL_TOP/fnd"
+export LOG_DIR="$APPL_TOP/admin/logs"
+export BACKUP_DIR="$APPL_TOP/admin/backup"
+export EBS_HOME="/u01/app/oracle/ebs"
+
+# 1. Check System Health (CPU, Memory, Disk Usage)
+echo "Checking system health (CPU, Memory, Disk Usage)..."
+top -n 1 | grep "Cpu(s)"
+free -h
+df -h
+echo "System health check completed."
+
+# 2. Check Oracle EBS Services Status (Node Manager, Admin Server, and others)
+echo "Checking Oracle EBS services (Node Manager, Admin Server)..."
+
+# Check Node Manager status
+ps -ef | grep -i nodemanager
+if [[ $? -ne 0 ]]; then
+  echo "Node Manager is not running, starting Node Manager..."
+  $EBS_HOME/bin/startNodeManager.sh
+else
+  echo "Node Manager is running."
+fi
+
+# Check WebLogic Admin Server status
+ps -ef | grep -i weblogic
+if [[ $? -ne 0 ]]; then
+  echo "WebLogic Admin Server is not running, starting Admin Server..."
+  $EBS_HOME/bin/startWebLogic.sh
+else
+  echo "WebLogic Admin Server is running."
+fi
+
+echo "Oracle EBS services check completed."
+
+# 3. Check Database Connection & Status
+echo "Checking Database connection and status..."
+sqlplus -s /nolog <<EOF
+connect / as sysdba
+SELECT INSTANCE_NAME, STATUS FROM V\$INSTANCE;
+EXIT;
+EOF
+echo "Database status check completed."
+
+# 4. Check for Locked Users in EBS
+echo "Checking for locked users in EBS..."
+sqlplus -s /nolog <<EOF
+connect apps/apps
+SELECT user_name, account_status FROM fnd_users WHERE account_status = 'LOCKED';
+EXIT;
+EOF
+echo "Locked users check completed."
+
+# 5. Check for Active Sessions in EBS
+echo "Checking for active sessions in EBS..."
+sqlplus -s /nolog <<EOF
+connect apps/apps
+SELECT session_id, user_name, os_user, status, last_call_et 
+FROM v\$session 
+WHERE status = 'ACTIVE';
+EXIT;
+EOF
+echo "Active sessions check completed."
+
+# 6. Query for Long Running Concurrent Jobs
+echo "Checking for long running concurrent jobs..."
+sqlplus -s /nolog <<EOF
+connect apps/apps
+SELECT request_id, status_code, elapsed_time 
+FROM fnd_concurrent_requests 
+WHERE status_code = 'RUNNING' 
+AND request_date < SYSDATE - 1/24;
+EXIT;
+EOF
+echo "Long running jobs check completed."
+
+# 7. Check if Patches are Applied
+echo "Checking for applied patches in Oracle EBS..."
+sqlplus -s /nolog <<EOF
+connect apps/apps
+SELECT patch_id, patch_name, patch_type, status, date_installed 
+FROM ad_bugs;
+EXIT;
+EOF
+echo "Patch check completed."
+
+# 8. Check Oracle EBS Log Files for Errors
+echo "Checking Oracle EBS logs for errors..."
+tail -n 100 $LOG_DIR/adop/adop*.log | grep -i "error"
+echo "Log file check completed."
+
+# 9. Backup Customizations and Configurations
+echo "Backing up Oracle EBS customizations..."
+tar -cvf $BACKUP_DIR/ebs_customizations_$(date +%F).tar $APPL_TOP/custom $EBS_HOME/custom
+
+# Check Backup Directory Size
+echo "Checking backup directory size..."
+du -sh $BACKUP_DIR
+echo "Backup completed."
+
+# 10. Check for and Cleanup Old Concurrent Request Logs
+echo "Cleaning up old concurrent request logs..."
+find $LOG_DIR -type f -name "*.log" -mtime +30 -exec rm -f {} \;
+echo "Old logs cleanup completed."
+
+# 11. Check EBS Environment Variables
+echo "Checking EBS environment variables..."
+echo "APPL_TOP = $APPL_TOP"
+echo "ORACLE_HOME = $ORACLE_HOME"
+echo "FND_TOP = $FND_TOP"
+echo "EBS_HOME = $EBS_HOME"
+
+# 12. Run ADOP Health Check
+echo "Running ADOP health check..."
+$APPL_TOP/bin/adop health_check
+echo "ADOP health check completed."
+
+# 13. Check for Running Services on Ports 5556 and 7001 (Node Manager, WLS Admin Server)
+echo "Checking for processes running on ports 5556 and 7001..."
+sudo netstat -tulnp | grep -E "5556|7001"
+
+# 14. Restart Node Manager and WebLogic Server if Needed
+echo "Restarting Node Manager and WebLogic Server if necessary..."
+sudo systemctl restart oracle-nodemanager
+sudo systemctl restart oracle-weblogic
+
+# 15. Check if Filesystem is Mounted and Check Disk Space for APPL_TOP
+echo "Checking if the filesystem is mounted and checking disk space for APPL_TOP..."
+df -h | grep $APPL_TOP
+
+# 16. Oracle EBS Database User Permissions Check
+echo "Checking database user permissions..."
+sqlplus -s /nolog <<EOF
+connect apps/apps
+SELECT * 
+FROM dba_tab_privs 
+WHERE grantee = 'FND_USER';
+EXIT;
+EOF
+echo "Database user permissions check completed."
+
+# 17. Run Cleanup for Stale Sessions and Cache
+echo "Running cleanup for stale sessions and cache..."
+sqlplus -s /nolog <<EOF
+connect apps/apps
+EXEC fnd_concurrent.start_clean_cache;
+EXIT;
+EOF
+echo "Cleanup for stale sessions and cache completed."
+
+# 18. Check EBS AD Services
+echo "Checking EBS AD services..."
+ps -ef | grep -i "ad*" | grep -v grep
+echo "AD services check completed."
+
+# 19. Generate a Report on All Active EBS Users
+echo "Generating a report on all active users..."
+sqlplus -s /nolog <<EOF
+connect apps/apps
+SELECT user_name, last_login_date FROM fnd_users WHERE account_status = 'ACTIVE';
+EXIT;
+EOF
+echo "Active users report generated."
+
+# Final Report Completion
+echo "EBS Maintenance Script Completed Successfully!"

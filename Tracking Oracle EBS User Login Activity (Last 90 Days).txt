@@ -1,0 +1,34 @@
+Tracking Oracle EBS User Login Activity (Last 90 Days)
+===============================================================
+The following SQL retrieves user login activity from the FND_LOGINS and FND_USER tables in Oracle E-Business Suite over the last 90 days.
+
+ALTER SESSION SET NLS_DATE_FORMAT = 'DD-MON-YYYY HH24:MI:SS';
+
+-- Retrieve login history and user details
+SELECT 
+    TO_CHAR(l.start_time, 'YYYY-MM-DD Day') AS login_day,
+    l.terminal_id,
+    fu.user_name,
+    fu.description AS user_description,
+    fu.employee_id,
+    TO_CHAR(fu.start_date, 'DD-MON-YYYY') AS user_start_date,
+    TO_CHAR(fu.end_date, 'DD-MON-YYYY') AS user_end_date,
+    COUNT(*) AS login_count,
+    TO_CHAR(MIN(l.start_time), 'DD-MON-YYYY HH24:MI:SS') AS first_login_time,
+    TO_CHAR(MAX(l.start_time), 'DD-MON-YYYY HH24:MI:SS') AS last_login_time
+FROM 
+    apps.fnd_logins l
+JOIN 
+    apps.fnd_user fu ON l.user_id = fu.user_id
+WHERE 
+    l.start_time > TRUNC(SYSDATE - 90)
+GROUP BY 
+    TO_CHAR(l.start_time, 'YYYY-MM-DD Day'),
+    l.terminal_id,
+    fu.user_name,
+    fu.description,
+    fu.employee_id,
+    fu.start_date,
+    fu.end_date
+ORDER BY 
+    login_day, terminal_id, user_name;
