@@ -1,0 +1,10 @@
+BEGIN
+  FOR r IN (SELECT object_name, object_type
+            FROM dba_objects
+            WHERE status='INVALID'
+            AND owner='APPS') LOOP
+    EXECUTE IMMEDIATE
+      'ALTER '||r.object_type||' '||r.object_name||' COMPILE';
+  END LOOP;
+END;
+/
