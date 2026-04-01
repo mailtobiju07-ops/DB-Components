@@ -1,0 +1,149 @@
+-- ============================================================
+-- Script Name : run_sta.sql
+-- Description : SQL Tuning Advisor Interactive Driver
+-- ============================================================
+
+SET SERVEROUTPUT ON
+SET VERIFY OFF
+
+PROMPT =========================================
+PROMPT   SQL Tuning Advisor - Interactive Mode
+PROMPT =========================================
+
+ACCEPT v_sqlid PROMPT 'Enter SQL_ID to tune: '
+
+DECLARE
+   l_task_name       VARCHAR2(200);
+   l_sql_text        CLOB;
+   l_parsing_schema  VARCHAR2(30);
+BEGIN
+   -- Fetch SQL text and parsing schema
+   BEGIN
+      SELECT sql_fulltext, parsing_schema_name
+      INTO   l_sql_text, l_parsing_schema
+      FROM   v$sqlarea
+      WHERE  sql_id = '&v_sqlid'
+      AND    ROWNUM = 1;
+   EXCEPTION
+      WHEN NO_DATA_FOUND THEN
+         DBMS_OUTPUT.put_line('ERROR: SQL_ID not found in shared pool.');
+         RAISE;
+   END;
+
+   DBMS_OUTPUT.put_line('Parsing Schema: ' || l_parsing_schema);
+
+   l_task_name := 'TUNE_' || UPPER('&v_sqlid');
+
+   -- Drop existing task (if any)
+   BEGIN
+      DBMS_SQLTUNE.drop_tuning_task(l_task_name);
+   EXCEPTION
+      WHEN OTHERS THEN NULL;
+   END;
+
+   -- Set parsing schema
+   IF l_parsing_schema IS NOT NULL THEN
+      EXECUTE IMMEDIATE 'ALTER SESSION SET CURRENT_SCHEMA = ' || l_parsing_schema;
+   END IF;
+
+   -- Create tuning task
+   l_task_name := DBMS_SQLTUNE.create_tuning_task(
+                     sql_text  => l_sql_text,
+                     task_name => l_task_name
+                  );
+
+   DBMS_OUTPUT.put_line('Executing tuning task...');
+   DBMS_SQLTUNE.execute_tuning_task(l_task_name);
+   DBMS_OUTPUT.put_line('Tuning completed.');
+
+END;
+/
+
+-- ============================================================
+-- TUNING REPORT
+-- ============================================================
+
+SET LONG 500000
+SET LINESIZE 200
+SET PAGESIZE 999
+
+SELECT DBMS_SQLTUNE.report_tuning_task('TUNE_' || UPPER('&v_sqlid'))
+FROM dual;
+/
+
+-- ============================================================
+-- ACCEPT SQL PROFILE (OPTIONAL)
+-- ============================================================
+
+ACCEPT v_ans PROMPT 'Accept SQL Profile (Y/N): '
+
+DECLARE
+   l_task VARCHAR2(200) := 'TUNE_' || UPPER('&v_sqlid');
+BEGIN
+   IF UPPER('&v_ans') = 'Y' THEN
+      DBMS_OUTPUT.put_line('Accepting SQL Profile...');
+      DBMS_SQLTUNE.accept_sql_profile(task_name => l_task, replace => TRUE);
+      DBMS_OUTPUT.put_line('SQL Profile created successfully.');
+   ELSE
+      DBMS_OUTPUT.put_line('Skipped SQL Profile.');
+   END IF;
+END;
+/
+
+-- ============================================================
+-- SQL PLAN BASELINE (OPTIONAL)
+-- ============================================================
+
+ACCEPT v_phv PROMPT 'Enter PLAN_HASH_VALUE (or N to skip): '
+
+DECLARE
+   l_task   VARCHAR2(200) := 'TUNE_' || UPPER('&v_sqlid');
+   l_owner  VARCHAR2(30)  := SYS_CONTEXT('USERENV','SESSION_USER');
+BEGIN
+   IF UPPER('&v_phv') NOT IN ('N','NO','NONE','') THEN
+      DBMS_OUTPUT.put_line('Run the below command to create baseline:');
+      DBMS_OUTPUT.put_line(
+         'EXEC dbms_sqltune.create_sql_plan_baseline('||
+         'task_name => '''|| l_task ||''', '||
+         'owner_name => '''|| l_owner ||''', '||
+         'plan_hash_value => '|| '&v_phv' ||');'
+      );
+   ELSE
+      DBMS_OUTPUT.put_line('Baseline step skipped.');
+   END IF;
+END;
+/
+
+-- ============================================================
+-- INDEX RECOMMENDATIONS
+-- ============================================================
+
+COLUMN ddl FORMAT A200
+
+SELECT
+   'CREATE INDEX '||
+   REGEXP_SUBSTR(aa.attr1, '[^.]+$', 1, 1) ||
+   ' ON '|| aa.attr3 || ' ' ||
+   aa.attr5 || ';' AS ddl
+FROM   dba_advisor_actions aa
+WHERE  aa.task_name = 'TUNE_' || UPPER('&v_sqlid')
+AND    UPPER(aa.command) LIKE 'CREATE INDEX%'
+ORDER BY aa.action_id;
+
+-- ============================================================
+-- CLEANUP (OPTIONAL)
+-- ============================================================
+
+ACCEPT v_clean PROMPT 'Delete tuning task? (Y/N): '
+
+DECLARE
+   l_task VARCHAR2(200) := 'TUNE_' || UPPER('&v_sqlid');
+BEGIN
+   IF UPPER('&v_clean') = 'Y' THEN
+      DBMS_SQLTUNE.drop_tuning_task(l_task);
+      DBMS_OUTPUT.put_line('Tuning task deleted.');
+   ELSE
+      DBMS_OUTPUT.put_line('Tuning task retained.');
+   END IF;
+END;
+/
