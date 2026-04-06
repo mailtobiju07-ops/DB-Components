@@ -1,0 +1,175 @@
+Description:
+This script analyzes database segment space usage using DBA_SEGMENTS and identifies the top space-consuming objects across the database.
+It ranks segments (tables, indexes, LOBs, etc.) by size and calculates their percentage contribution to total storage, helping DBAs quickly identify storage-heavy objects.
+-- ============================================================
+-- Script Name  : top_storage_objects_dba.sql
+-- Description  : Identify top space-consuming objects (DBA view)
+-- ============================================================
+
+WITH segment_summary AS (
+    SELECT  
+        segment_type,
+        owner,
+        segment_name,
+        tablespace_name,
+        COUNT(*) segment_count,
+        SUM(extents) total_extents,
+        SUM(blocks) total_blocks,
+        SUM(bytes) total_bytes
+    FROM dba_segments
+    GROUP BY
+        segment_type,
+        owner,
+        segment_name,
+        tablespace_name
+),
+
+database_totals AS (
+    SELECT  
+        SUM(segment_count) segments,
+        SUM(total_extents) extents,
+        SUM(total_blocks) blocks,
+        SUM(total_bytes) bytes
+    FROM segment_summary
+),
+
+top_segments_pre AS (
+    SELECT  
+        ROWNUM rank_no,
+        v.*
+    FROM (
+        SELECT 
+            s.segment_type,
+            s.owner,
+            s.segment_name,
+            s.tablespace_name,
+            s.segment_count,
+            s.total_extents,
+            s.total_blocks,
+            s.total_bytes,
+
+            ROUND((s.segment_count / t.segments) * 100, 3) seg_pct,
+            ROUND((s.total_extents / t.extents) * 100, 3) ext_pct,
+            ROUND((s.total_blocks / t.blocks) * 100, 3) blk_pct,
+            ROUND((s.total_bytes / t.bytes) * 100, 3) bytes_pct
+
+        FROM segment_summary s
+        CROSS JOIN database_totals t
+        ORDER BY bytes_pct DESC NULLS LAST
+    ) v
+    WHERE ROWNUM <= 200
+),
+
+top_segments AS (
+    SELECT 
+        p.*,
+
+        -- Object mapping
+        (SELECT object_id
+         FROM dba_objects o
+         WHERE o.owner = p.owner
+           AND o.object_name = p.segment_name
+           AND o.object_type = p.segment_type
+           AND o.object_type NOT LIKE '%PARTITION%') object_id,
+
+        (SELECT data_object_id
+         FROM dba_objects o
+         WHERE o.owner = p.owner
+           AND o.object_name = p.segment_name
+           AND o.object_type = p.segment_type
+           AND o.object_type NOT LIKE '%PARTITION%') data_object_id,
+
+        -- Cumulative %
+        (SELECT SUM(p2.bytes_pct)
+         FROM top_segments_pre p2
+         WHERE p2.rank_no <= p.rank_no) cumulative_pct
+
+    FROM top_segments_pre p
+),
+
+top_20_summary AS (
+    SELECT SUM(total_bytes) bytes, SUM(bytes_pct) pct
+    FROM top_segments WHERE rank_no <= 20
+),
+
+top_100_summary AS (
+    SELECT SUM(total_bytes) bytes, SUM(bytes_pct) pct
+    FROM top_segments WHERE rank_no <= 100
+),
+
+top_200_summary AS (
+    SELECT SUM(total_bytes) bytes, SUM(bytes_pct) pct
+    FROM top_segments
+)
+
+SELECT 
+    t.rank_no,
+    t.segment_type,
+    t.owner,
+    t.segment_name,
+    t.tablespace_name,
+
+    -- Table mapping
+    CASE
+        WHEN t.segment_type LIKE 'INDEX%' THEN
+            (SELECT table_name FROM dba_indexes i
+             WHERE i.owner = t.owner AND i.index_name = t.segment_name)
+        WHEN t.segment_type LIKE 'LOB%' THEN
+            (SELECT table_name FROM dba_lobs l
+             WHERE l.owner = t.owner AND l.segment_name = t.segment_name)
+    END AS table_name,
+
+    t.total_bytes,
+    ROUND(t.total_bytes/1024/1024,2) AS size_mb,
+    ROUND(t.total_bytes/1024/1024/1024,3) AS size_gb,
+
+    t.bytes_pct,
+    t.cumulative_pct
+
+FROM top_segments t
+
+UNION ALL
+
+SELECT NULL,NULL,NULL,NULL,'TOP 20',
+       bytes,
+       ROUND(bytes/1024/1024,2),
+       ROUND(bytes/1024/1024/1024,3),
+       pct,
+       NULL
+FROM top_20_summary
+
+UNION ALL
+
+SELECT NULL,NULL,NULL,NULL,'TOP 100',
+       bytes,
+       ROUND(bytes/1024/1024,2),
+       ROUND(bytes/1024/1024/1024,3),
+       pct,
+       NULL
+FROM top_100_summary
+
+UNION ALL
+
+SELECT NULL,NULL,NULL,NULL,'TOP 200',
+       bytes,
+       ROUND(bytes/1024/1024,2),
+       ROUND(bytes/1024/1024/1024,3),
+       pct,
+       NULL
+FROM top_200_summary
+
+ORDER BY rank_no NULLS LAST;
+
+===========================================================================================================
+RANK SEGMENT_TYPE OWNER   SEGMENT_NAME        OBJECT_ID DATA_OBJ_ID TABLESPACE_NAME TABLE_NAME   SEGMENTS EXTENTS BLOCKS      BYTES        GB     SEG_PERC EXT_PERC BLK_PERC BYTES_PERC PERC_CUM
+---- ------------ ------- ------------------- --------- ----------- --------------- ------------ -------- -------- -------- ------------ ------ -------- -------- -------- ---------- --------
+1    TABLE        APPS    XX_ORDER_HEADERS    123456    123456      APPS_TS_TX_DATA  -            1        1200     980000   8032092160   8.032   0.150    0.220    0.180    12.500     12.500
+2    INDEX        APPS    XX_ORDER_HEADERS_N1 123457    123457      APPS_TS_TX_IDX   XX_ORDER_HEADERS
+                                                                                               1        950      720000   5892997120   5.893   0.120    0.180    0.140    9.200      21.700
+3    TABLE        APPS    XX_TRANSACTIONS     123458    123458      APPS_TS_TX_DATA  -            1        850      650000   5326766080   5.326   0.110    0.150    0.120    8.300      30.000
+4    LOBSEGMENT   APPS    SYS_LOB00012345     123459    123459      APPS_TS_TX_DATA  XX_DOCUMENTS
+                                                                                               1        700      540000   4429185024   4.429   0.090    0.120    0.100    6.900      36.900
+5    TABLE        APPS    XX_LOG_TABLE        123460    123460      APPS_TS_TX_DATA  -            1        600      500000   4096000000   4.096   0.080    0.100    0.090    6.400      43.300
+...
+20   INDEX        APPS    XX_CUSTOM_IDX_5     123480    123480      APPS_TS_TX_IDX   XX_CUSTOMERS
+                                                                                               1        200      180000   1474560000   1.474   0.030    0.040    0.030    2.300      65.000
