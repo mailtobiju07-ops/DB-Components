@@ -1,0 +1,77 @@
+Desc:This script identifies redundant (non-unique) indexes in an Oracle database.
+
+An index is considered redundant when:
+
+Its columns are a left-prefix of another index on the same table.
+==>Example
+IDX_A → (COL1, COL2)
+IDX_B → (COL1, COL2, COL3)
+
+So,IDX_A is redundant because IDX_B can serve the same purpose.
+
+-- ============================================================
+-- Script Name  : redundant_indexes.sql
+-- Description  : Identify redundant indexes in Oracle
+-- Author       : Biju M
+-- Created Date : 2026-04-06
+-- ============================================================
+
+WITH indexed_columns AS (
+    SELECT 
+        col.index_owner,
+        col.index_name,
+        col.table_owner,
+        col.table_name,
+        idx.index_type,
+        idx.uniqueness,
+        LISTAGG(col.column_name, ':') 
+            WITHIN GROUP (ORDER BY col.column_position) AS indexed_columns
+    FROM dba_ind_columns col
+    JOIN dba_indexes idx
+        ON idx.owner = col.index_owner
+       AND idx.index_name = col.index_name
+    WHERE col.table_owner NOT IN (
+        'ANONYMOUS','APEX_030200','APEX_040000','APEX_SSO','APPQOSSYS','CTXSYS',
+        'DBSNMP','DIP','EXFSYS','FLOWS_FILES','MDSYS','OLAPSYS','ORACLE_OCM',
+        'ORDDATA','ORDPLUGINS','ORDSYS','OUTLN','OWBSYS',
+        'SI_INFORMTN_SCHEMA','SQLTXADMIN','SQLTXPLAIN','SYS','SYSMAN','SYSTEM',
+        'TRCANLZR','WMSYS','XDB','XS$NULL','PERFSTAT','STDBYPERF','MGDSYS','OJVMSYS'
+    )
+    GROUP BY
+        col.index_owner,
+        col.index_name,
+        col.table_owner,
+        col.table_name,
+        idx.index_type,
+        idx.uniqueness
+)
+
+SELECT 
+    r.table_owner,
+    r.table_name,
+    r.index_type,
+    r.index_name || ' (' || r.indexed_columns || ')' AS redundant_index,
+    i.index_name || ' (' || i.indexed_columns || ')' AS superset_index
+FROM indexed_columns r
+JOIN indexed_columns i
+    ON i.table_owner = r.table_owner
+   AND i.table_name  = r.table_name
+   AND i.index_type  = r.index_type
+   AND i.index_name != r.index_name
+WHERE i.indexed_columns LIKE r.indexed_columns || ':%'
+  AND r.uniqueness = 'NONUNIQUE'
+ORDER BY
+    r.table_owner,
+    r.table_name,
+    r.index_name,
+    i.index_name;
+===================================================================================
+How to Use
+-- Run as DBA user
+@advanced_redundant_indexes.sql
+===================================================================================
+Sample Output:
+
+| TABLE | REDUNDANT_INDEX | SUPERSET_INDEX | SIZE_MB |
+| ----- | --------------- | -------------- | ------- |
+| EMP   | IDX_A           | IDX_B          | 120     |
