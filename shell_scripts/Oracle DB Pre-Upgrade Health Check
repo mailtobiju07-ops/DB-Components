@@ -1,0 +1,311 @@
+Description:
+ A production-ready Oracle DBA script to validate database readiness and detect issues before upgrade.
+
+-- ============================================================
+-- Script Name  : db_upgrade_precheck.sql
+-- Purpose      : Oracle DB Pre-Upgrade Health Check
+-- Compatible   : 11g / 12c / 19c / 21c+
+-- ============================================================
+
+-- 🔒 Safety
+WHENEVER SQLERROR EXIT FAILURE;
+WHENEVER OSERROR EXIT FAILURE;
+
+SET LINES 180
+SET PAGES 500
+SET TRIMSPOOL ON
+SET VERIFY OFF
+SET FEEDBACK OFF
+
+-- 🔹 Input
+DEFINE log_path = '&1'
+
+COLUMN ts NEW_VALUE timestamp
+SELECT TO_CHAR(SYSDATE,'YYYYMMDD_HH24MISS') ts FROM dual;
+
+COLUMN dbname NEW_VALUE dbname
+SELECT name dbname FROM v$database;
+
+SPOOL &log_path/db_upgrade_precheck_&&dbname._&&timestamp..log
+
+PROMPT ==================================================
+PROMPT Oracle Database Pre-Upgrade Diagnostic Report
+PROMPT Generated on: &&timestamp
+PROMPT ==================================================
+
+-- ==================================================
+PROMPT [1] BASIC DATABASE INFO
+-- ==================================================
+
+COL host FORMAT A30
+SELECT host_name host FROM v$instance;
+
+SELECT name, db_unique_name, cdb FROM v$database;
+
+SELECT instance_name, version, status FROM v$instance;
+
+SELECT TO_CHAR(startup_time,'DD-MON-YYYY HH24:MI') startup_time 
+FROM v$instance;
+
+-- ==================================================
+PROMPT [2] DATABASE CONFIGURATION
+-- ==================================================
+
+SHOW PARAMETER compatible
+SHOW PARAMETER cluster_database
+ARCHIVE LOG LIST
+
+-- ==================================================
+PROMPT [3] TABLESPACE USAGE
+-- ==================================================
+
+COL tablespace_name FORMAT A25
+SELECT tablespace_name,
+       ROUND(used_percent,2) used_pct
+FROM dba_tablespace_usage_metrics
+ORDER BY used_percent DESC;
+
+-- ==================================================
+PROMPT [4] INVALID OBJECTS SUMMARY
+-- ==================================================
+
+SELECT owner, COUNT(*) invalid_count
+FROM dba_objects
+WHERE status='INVALID'
+GROUP BY owner
+ORDER BY invalid_count DESC;
+
+PROMPT ---- TOP INVALID OBJECTS ----
+
+SELECT owner, object_name, object_type
+FROM dba_objects
+WHERE status='INVALID'
+AND ROWNUM <= 50;
+
+-- ==================================================
+PROMPT [5] COMPONENT STATUS
+-- ==================================================
+
+COL comp_name FORMAT A40
+SELECT comp_id, comp_name, status, version
+FROM dba_registry
+ORDER BY comp_name;
+
+-- ==================================================
+PROMPT [6] JVM CHECK
+-- ==================================================
+
+SELECT comp_name, status 
+FROM dba_registry 
+WHERE comp_id='JAVAVM';
+
+SELECT COUNT(*) java_invalids
+FROM dba_objects
+WHERE object_type LIKE '%JAVA%'
+AND status='INVALID';
+
+-- ==================================================
+PROMPT [7] BLOCKING SESSIONS
+-- ==================================================
+
+SELECT sid, serial#, blocking_session
+FROM v$session
+WHERE blocking_session IS NOT NULL;
+
+-- ==================================================
+PROMPT [8] UNUSED / UNUSABLE INDEXES
+-- ==================================================
+
+SELECT owner, index_name, status
+FROM dba_indexes
+WHERE status='UNUSABLE';
+
+-- ==================================================
+PROMPT [9] AUDIT TABLE CHECK (SAFE)
+-- ==================================================
+
+SELECT table_name, num_rows
+FROM dba_tables
+WHERE table_name IN ('AUD$','FGA_LOG$');
+
+-- ==================================================
+PROMPT [10] DUPLICATE OBJECT CHECK (SAFE)
+-- ==================================================
+
+SELECT COUNT(*) duplicate_objects
+FROM dba_objects o1
+JOIN dba_objects o2
+  ON o1.object_name = o2.object_name
+ AND o1.object_type = o2.object_type
+WHERE o1.owner='SYS'
+AND o2.owner='SYSTEM';
+
+-- ==================================================
+PROMPT [11] TIMEZONE VERSION
+-- ==================================================
+
+SELECT version FROM v$timezone_file;
+
+-- ==================================================
+PROMPT [12] DATABASE BIT VERSION
+-- ==================================================
+
+SELECT CASE 
+       WHEN INSTR(banner,'64') > 0 THEN '64-bit'
+       ELSE '32-bit'
+       END AS db_bit_version
+FROM v$version
+WHERE banner LIKE 'Oracle Database%';
+
+-- ==================================================
+PROMPT [13] TOP SEGMENTS (SPACE CHECK)
+-- ==================================================
+
+SELECT *
+FROM (
+  SELECT owner, segment_name, segment_type,
+         ROUND(bytes/1024/1024/1024,2) GB
+  FROM dba_segments
+  ORDER BY bytes DESC
+)
+WHERE ROWNUM <= 20;
+
+-- ==================================================
+PROMPT [14] FINAL STATUS SUMMARY
+-- ==================================================
+
+PROMPT Review:
+PROMPT - Invalid objects
+PROMPT - Component status
+PROMPT - Tablespace usage
+PROMPT - JVM status
+PROMPT - Blocking sessions
+
+PROMPT ==================================================
+PROMPT *** END OF REPORT ***
+PROMPT ==================================================
+
+SPOOL OFF
+==========================================================================================
+Sample Output (Short)
+
+==================================================
+Oracle Database Pre-Upgrade Diagnostic Report
+Generated on: 20260406_094500
+==================================================
+
+[1] BASIC DATABASE INFO
+------------------------------------------
+Host Name           : prod-db-server01
+Database Name       : ORCL
+DB Unique Name      : ORCL_PROD
+CDB                 : YES
+Instance Name       : orcl1
+Version             : 19.0.0.0.0
+Startup Time        : 05-APR-2026 08:15
+
+[2] DATABASE CONFIGURATION
+------------------------------------------
+compatible          : 19.0.0
+cluster_database    : FALSE
+Archive Log Mode    : ARCHIVELOG
+
+[3] TABLESPACE USAGE
+------------------------------------------
+TABLESPACE_NAME         USED_PCT
+----------------------  --------
+USERS                   88.50
+APPS_TS_TX_DATA         82.10
+SYSTEM                  72.45
+SYSAUX                  68.30
+
+⚠️ Warning: USERS tablespace nearing capacity
+
+[4] INVALID OBJECTS SUMMARY
+------------------------------------------
+OWNER        INVALID_COUNT
+------------ -------------
+APPS         18
+SYS          2
+
+---- TOP INVALID OBJECTS ----
+OWNER   OBJECT_NAME            OBJECT_TYPE
+------  ---------------------  ----------------
+APPS    XX_ORDER_PKG           PACKAGE BODY
+APPS    XX_CUSTOM_VIEW         VIEW
+
+⚠️ Action Required: Recompile invalid objects
+
+[5] COMPONENT STATUS
+------------------------------------------
+COMP_ID   COMPONENT_NAME                    STATUS   VERSION
+--------  -------------------------------- ---------- --------
+CATPROC   Oracle Database Packages          VALID    19.0.0.0
+XDB       Oracle XML Database               VALID    19.0.0.0
+JAVAVM    JServer JAVA Virtual Machine      VALID    19.0.0.0
+
+[6] JVM CHECK
+------------------------------------------
+JAVAVM Status        : VALID
+Invalid JAVA Objects : 0
+
+[7] BLOCKING SESSIONS
+------------------------------------------
+No blocking sessions found
+
+[8] UNUSABLE INDEXES
+------------------------------------------
+OWNER   INDEX_NAME        STATUS
+------  ----------------- --------
+APPS    XX_IDX_ORDERS     UNUSABLE
+
+⚠️ Action Required: Rebuild unusable indexes
+
+[9] AUDIT TABLE CHECK
+------------------------------------------
+TABLE_NAME   NUM_ROWS
+------------ --------
+AUD$         12500000
+FGA_LOG$     250000
+
+⚠️ Warning: Audit tables are large (consider purge)
+
+[10] DUPLICATE OBJECT CHECK
+------------------------------------------
+Duplicate Objects Found: 2
+
+⚠️ Review required (SYS vs SYSTEM overlap)
+
+[11] TIMEZONE VERSION
+------------------------------------------
+Version : 32
+
+[12] DATABASE BIT VERSION
+------------------------------------------
+64-bit
+
+[13] TOP SEGMENTS (SPACE USAGE)
+------------------------------------------
+OWNER   SEGMENT_NAME         TYPE    SIZE(GB)
+------  -------------------  ------  --------
+APPS    XX_ORDERS            TABLE   12.50
+APPS    XX_ORDERS_IDX1       INDEX   8.20
+APPS    XX_LOG_TABLE         TABLE   6.75
+
+📊 Top 3 objects consume significant storage
+
+[14] FINAL STATUS SUMMARY
+------------------------------------------
+✔ Database Version        : OK
+✔ Component Status        : OK
+⚠ Invalid Objects         : FOUND
+⚠ Tablespace Usage        : HIGH
+⚠ Unusable Indexes        : FOUND
+⚠ Audit Table Size        : HIGH
+
+==================================================
+*** END OF REPORT ***
+==================================================
+
+Report Location:
+/u01/scripts/db_upgrade_precheck_ORCL_20260406_094500.log
