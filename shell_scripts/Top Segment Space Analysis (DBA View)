@@ -12,10 +12,10 @@ WITH segment_summary AS (
         owner,
         segment_name,
         tablespace_name,
-        COUNT(*) segment_count,
-        SUM(extents) total_extents,
-        SUM(blocks) total_blocks,
-        SUM(bytes) total_bytes
+        COUNT(*) AS segment_count,
+        SUM(extents) AS total_extents,
+        SUM(blocks) AS total_blocks,
+        SUM(bytes) AS total_bytes
     FROM dba_segments
     GROUP BY
         segment_type,
@@ -26,138 +26,158 @@ WITH segment_summary AS (
 
 database_totals AS (
     SELECT  
-        SUM(segment_count) segments,
-        SUM(total_extents) extents,
-        SUM(total_blocks) blocks,
-        SUM(total_bytes) bytes
+        SUM(segment_count) AS segments,
+        SUM(total_extents) AS extents,
+        SUM(total_blocks) AS blocks,
+        SUM(total_bytes) AS bytes
     FROM segment_summary
 ),
 
-top_segments_pre AS (
-    SELECT  
-        ROWNUM rank_no,
-        v.*
-    FROM (
-        SELECT 
-            s.segment_type,
-            s.owner,
-            s.segment_name,
-            s.tablespace_name,
-            s.segment_count,
-            s.total_extents,
-            s.total_blocks,
-            s.total_bytes,
-
-            ROUND((s.segment_count / t.segments) * 100, 3) seg_pct,
-            ROUND((s.total_extents / t.extents) * 100, 3) ext_pct,
-            ROUND((s.total_blocks / t.blocks) * 100, 3) blk_pct,
-            ROUND((s.total_bytes / t.bytes) * 100, 3) bytes_pct
-
-        FROM segment_summary s
-        CROSS JOIN database_totals t
-        ORDER BY bytes_pct DESC NULLS LAST
-    ) v
-    WHERE ROWNUM <= 200
+ranked_segments AS (
+    SELECT 
+        s.*,
+        ROUND((s.total_bytes / t.bytes) * 100, 3) AS bytes_pct,
+        ROW_NUMBER() OVER (ORDER BY s.total_bytes DESC) AS rank_no
+    FROM segment_summary s
+    CROSS JOIN database_totals t
 ),
 
 top_segments AS (
+    SELECT *
+    FROM ranked_segments
+    WHERE rank_no <= 200
+),
+
+-- Object mapping (JOIN instead of scalar subqueries)
+object_map AS (
     SELECT 
-        p.*,
+        owner,
+        object_name,
+        object_type,
+        object_id,
+        data_object_id
+    FROM dba_objects
+    WHERE object_type NOT LIKE '%PARTITION%'
+),
 
-        -- Object mapping
-        (SELECT object_id
-         FROM dba_objects o
-         WHERE o.owner = p.owner
-           AND o.object_name = p.segment_name
-           AND o.object_type = p.segment_type
-           AND o.object_type NOT LIKE '%PARTITION%') object_id,
+index_map AS (
+    SELECT owner, index_name, table_name
+    FROM dba_indexes
+),
 
-        (SELECT data_object_id
-         FROM dba_objects o
-         WHERE o.owner = p.owner
-           AND o.object_name = p.segment_name
-           AND o.object_type = p.segment_type
-           AND o.object_type NOT LIKE '%PARTITION%') data_object_id,
+lob_map AS (
+    SELECT owner, segment_name, table_name
+    FROM dba_lobs
+),
 
-        -- Cumulative %
-        (SELECT SUM(p2.bytes_pct)
-         FROM top_segments_pre p2
-         WHERE p2.rank_no <= p.rank_no) cumulative_pct
+final_data AS (
+    SELECT 
+        t.rank_no,
+        t.segment_type,
+        t.owner,
+        t.segment_name,
+        t.tablespace_name,
 
-    FROM top_segments_pre p
+        COALESCE(i.table_name, l.table_name) AS table_name,
+
+        t.total_bytes,
+        ROUND(t.total_bytes/1024/1024,2) AS size_mb,
+        ROUND(t.total_bytes/1024/1024/1024,3) AS size_gb,
+
+        t.bytes_pct,
+
+        -- ⚡ Analytic cumulative %
+        ROUND(SUM(t.bytes_pct) OVER (ORDER BY t.rank_no), 3) AS cumulative_pct
+
+    FROM top_segments t
+    LEFT JOIN object_map o
+        ON o.owner = t.owner
+       AND o.object_name = t.segment_name
+       AND o.object_type = t.segment_type
+
+    LEFT JOIN index_map i
+        ON i.owner = t.owner
+       AND i.index_name = t.segment_name
+
+    LEFT JOIN lob_map l
+        ON l.owner = t.owner
+       AND l.segment_name = t.segment_name
 ),
 
 top_20_summary AS (
-    SELECT SUM(total_bytes) bytes, SUM(bytes_pct) pct
-    FROM top_segments WHERE rank_no <= 20
+    SELECT 
+        SUM(total_bytes) AS bytes,
+        SUM(bytes_pct) AS pct
+    FROM final_data
+    WHERE rank_no <= 20
 ),
 
 top_100_summary AS (
-    SELECT SUM(total_bytes) bytes, SUM(bytes_pct) pct
-    FROM top_segments WHERE rank_no <= 100
+    SELECT 
+        SUM(total_bytes) AS bytes,
+        SUM(bytes_pct) AS pct
+    FROM final_data
+    WHERE rank_no <= 100
 ),
 
 top_200_summary AS (
-    SELECT SUM(total_bytes) bytes, SUM(bytes_pct) pct
-    FROM top_segments
+    SELECT 
+        SUM(total_bytes) AS bytes,
+        SUM(bytes_pct) AS pct
+    FROM final_data
 )
 
-SELECT 
-    t.rank_no,
-    t.segment_type,
-    t.owner,
-    t.segment_name,
-    t.tablespace_name,
+SELECT * FROM (
+    SELECT 
+        rank_no,
+        segment_type,
+        owner,
+        segment_name,
+        tablespace_name,
+        table_name,
+        total_bytes,
+        size_mb,
+        size_gb,
+        bytes_pct,
+        cumulative_pct
+    FROM final_data
 
-    -- Table mapping
-    CASE
-        WHEN t.segment_type LIKE 'INDEX%' THEN
-            (SELECT table_name FROM dba_indexes i
-             WHERE i.owner = t.owner AND i.index_name = t.segment_name)
-        WHEN t.segment_type LIKE 'LOB%' THEN
-            (SELECT table_name FROM dba_lobs l
-             WHERE l.owner = t.owner AND l.segment_name = t.segment_name)
-    END AS table_name,
+    UNION ALL
 
-    t.total_bytes,
-    ROUND(t.total_bytes/1024/1024,2) AS size_mb,
-    ROUND(t.total_bytes/1024/1024/1024,3) AS size_gb,
+    SELECT 
+        NULL,NULL,NULL,NULL,'TOP 20',
+        NULL,
+        bytes,
+        ROUND(bytes/1024/1024,2),
+        ROUND(bytes/1024/1024/1024,3),
+        pct,
+        NULL
+    FROM top_20_summary
 
-    t.bytes_pct,
-    t.cumulative_pct
+    UNION ALL
 
-FROM top_segments t
+    SELECT 
+        NULL,NULL,NULL,NULL,'TOP 100',
+        NULL,
+        bytes,
+        ROUND(bytes/1024/1024,2),
+        ROUND(bytes/1024/1024/1024,3),
+        pct,
+        NULL
+    FROM top_100_summary
 
-UNION ALL
+    UNION ALL
 
-SELECT NULL,NULL,NULL,NULL,'TOP 20',
-       bytes,
-       ROUND(bytes/1024/1024,2),
-       ROUND(bytes/1024/1024/1024,3),
-       pct,
-       NULL
-FROM top_20_summary
-
-UNION ALL
-
-SELECT NULL,NULL,NULL,NULL,'TOP 100',
-       bytes,
-       ROUND(bytes/1024/1024,2),
-       ROUND(bytes/1024/1024/1024,3),
-       pct,
-       NULL
-FROM top_100_summary
-
-UNION ALL
-
-SELECT NULL,NULL,NULL,NULL,'TOP 200',
-       bytes,
-       ROUND(bytes/1024/1024,2),
-       ROUND(bytes/1024/1024/1024,3),
-       pct,
-       NULL
-FROM top_200_summary
-
+    SELECT 
+        NULL,NULL,NULL,NULL,'TOP 200',
+        NULL,
+        bytes,
+        ROUND(bytes/1024/1024,2),
+        ROUND(bytes/1024/1024/1024,3),
+        pct,
+        NULL
+    FROM top_200_summary
+)
 ORDER BY rank_no NULLS LAST;
 
 ===========================================================================================================
